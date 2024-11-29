@@ -1,0 +1,37 @@
+
+# After the training loop
+print("Training complete. Saving the model...")
+
+# Save the model
+model.save_pretrained(save_directory)
+
+print(f"Model saved to {save_directory}")
+
+from transformers import GPT2Config, GPT2PreTrainedModel
+from peft import PeftModel
+
+# Define the same configuration used during training
+config = GPT2Config(
+    vocab_size=1,
+    n_positions=100,
+    n_ctx=100,
+    n_embd=256,
+    n_layer=4,
+    n_head=4,
+)
+
+# Initialize the base model
+base_model = GPT2TimeSeries(config=config)
+
+# Load the base model
+base_model = GPT2PreTrainedModel.from_pretrained(save_directory, config=config)
+
+# Load the PEFT model (LoRA adapters)
+model = PeftModel.from_pretrained(base_model, save_directory)
+
+# Move the model to the appropriate device
+model.to(device)
+
+# Set the model to evaluation mode if needed
+model.eval()
+
