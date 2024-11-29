@@ -1,0 +1,137 @@
+import torch
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from transformers import GPT2Config, GPT2Model, GPT2PreTrainedModel
+import torch.nn as nn
+from peft import get_peft_config, get_peft_model, LoraConfig, TaskType
+import torch.optim as optim
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+
+# 1. Data Preparation
+class TimeSeriesDataset(Dataset):
+    def __init__(self, data, input_window=100, output_window=10):
+        self.input_window = input_window
+        self.output_window = output_window
+        self.data = data
+        self.length = len(data) - input_window - output_window + 1
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        x = self.data[idx : idx + self.input_window]
+        y = self.data[idx + self.input_window : idx + self.input_window + self.output_window]
+        return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+
+# Load and preprocess data
+
+data = means
+
+# Create dataset and dataloaders
+dataset = TimeSeriesDataset(data)
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+
+batch_size = 8
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size)
+
+# 2. Model Configuration
+class GPT2TimeSeries(GPT2PreTrainedModel):
+    def __init__(self, config, output_window=10):
+        super().__init__(config)
+        self.transformer = GPT2Model(config)
+        self.output_window = output_window
+        self.linear = nn.Linear(20, config.n_embd)  # Project 20 features to embedding size
+        self.output_layer = nn.Linear(config.n_embd, 20 * output_window)  # Predict 10 steps with 20 features each
+        self.init_weights()
+
+    def forward(self, input_ids, labels=None, **kwargs):
+        # input_ids: (batch_size, seq_length, 20)
+        hidden_states = self.linear(input_ids)  # (batch_size, seq_length, n_embd)
+        transformer_outputs = self.transformer(inputs_embeds=hidden_states)
+        hidden_states = transformer_outputs.last_hidden_state  # (batch_size, seq_length, n_embd)
+
+        # Use the last token's hidden state for prediction
+        last_hidden = hidden_states[:, -1, :]  # (batch_size, n_embd)
+        output = self.output_layer(last_hidden)  # (batch_size, 20 * output_window)
+        output = output.view(-1, self.output_window, 20)  # (batch_size, output_window, 20)
+
+        loss = None
+        if labels is not None:
+            loss_fn = nn.MSELoss()
+            loss = loss_fn(output, labels)
+
+        return (loss, output) if loss is not None else output
+
+# Define GPT-2 configuration
+config = GPT2Config(
+    vocab_size=1,
+    n_positions=100,
+    n_ctx=100,
+    n_embd=256,
+    n_layer=4,
+    n_head=4,
+)
+
+# Initialize model
+model = GPT2TimeSeries(config=config)
+
+# 3. Integrate LoRA
+lora_config = LoraConfig(
+    r=8,
+    lora_alpha=32,
+    target_modules=["c_attn", "c_proj"],
+    lora_dropout=0.1,
+    bias="none",
+    task_type=TaskType.CAUSAL_LM,
+)
+
+model = get_peft_model(model, lora_config)
+model.print_trainable_parameters()
+
+# 4. Training Setup
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+optimizer = optim.AdamW(model.parameters(), lr=1e-4)
+num_epochs = 50
+output_window = 10
+
+# 5. Training Loop
+for epoch in range(num_epochs):
+    model.train()
+    train_loss = 0.0
+    for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}"):
+        inputs, targets = batch
+        inputs = inputs.to(device)  # (batch_size, 1000, 20)
+        targets = targets.to(device)  # (batch_size, 10, 20)
+
+        optimizer.zero_grad()
+        loss, outputs = model(inputs, labels=targets)
+        loss.backward()
+        optimizer.step()
+
+        train_loss += loss.item() * inputs.size(0)
+
+    avg_train_loss = train_loss / len(train_loader.dataset)
+    print(f"Epoch {epoch+1}/{num_epochs}, Training Loss: {avg_train_loss:.4f}")
+
+    # Validation
+    model.eval()
+    val_loss = 0.0
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc=f"Validation Epoch {epoch+1}"):
+            inputs, targets = batch
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+
+            loss, outputs = model(inputs, labels=targets)
+            val_loss += loss.item() * inputs.size(0)
+
+    avg_val_loss = val_loss / len(val_loader.dataset)
+    print(f"Epoch {epoch+1}/{num_epochs}, Validation Loss: {avg_val_loss:.4f}")
+
+
